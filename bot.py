@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -74,6 +76,15 @@ NICK_LOCK_DELAY = 200
 # At most one pending reset per user. Renaming repeatedly during the countdown
 # would otherwise stack up timers that all fire at once at the end.
 _nick_tasks: dict[int, asyncio.Task] = {}
+
+# Arc-tober filter: this user's messages that spell "arc-tober" in any disguise
+# are deleted after the delay.
+ARCTOBER_USER_ID = 850911464457240626
+ARCTOBER_DELETE_DELAY = 20
+
+# Pending deletions by message ID. An edit can match the same message again,
+# and holding the task keeps it from being garbage collected mid-sleep.
+_arctober_tasks: dict[int, asyncio.Task] = {}
 
 # on_ready fires again on every gateway reconnect, and startup work must not
 # stack up overlapping runs. Holding the task also keeps it from being garbage
@@ -727,6 +738,74 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     )
 
 
+# Lookalikes that Unicode normalization leaves alone: leetspeak, Cyrillic and
+# Greek letters that render the same as Latin ones, small caps, and the
+# regional-indicator letters Discord shows as flag-style emoji.
+_LOOKALIKES = str.maketrans({
+    "4": "a", "@": "a", "а": "a", "α": "a", "ᴀ": "a",
+    "8": "b", "в": "b", "β": "b", "ʙ": "b",
+    "(": "c", "<": "c", "¢": "c", "©": "c", "k": "c", "с": "c", "ᴄ": "c",
+    "3": "e", "€": "e", "е": "e", "ε": "e", "ᴇ": "e",
+    "0": "o", "о": "o", "ο": "o", "ᴏ": "o",
+    "®": "r", "г": "r", "я": "r", "ʀ": "r",
+    "7": "t", "+": "t", "т": "t", "τ": "t", "ᴛ": "t",
+    **{chr(0x1F1E6 + i): chr(ord("a") + i) for i in range(26)},
+})
+
+
+def _mentions_arctober(text: str) -> bool:
+    """Whether text spells arc-tober, however it is disguised.
+
+    NFKD folds fullwidth, bold, script, and circled letters to plain ones and
+    splits accents off; the table above covers what it misses. Then everything
+    but letters goes, so separators, spacing, spoilers, and zero-width
+    characters stop mattering, and repeated letters collapse ("arrrc").
+    """
+    text = unicodedata.normalize("NFKD", text).casefold().translate(_LOOKALIKES)
+    letters = re.sub(r"[^a-z]", "", text)
+    return "arctober" in re.sub(r"(.)\1+", r"\1", letters)
+
+
+async def _delete_arctober_later(message: discord.Message) -> None:
+    """Wait out the delay, then delete the message."""
+    try:
+        await asyncio.sleep(ARCTOBER_DELETE_DELAY)
+        await message.delete()
+        print(f"[arctober] deleted {message.id}", flush=True)
+    except discord.NotFound:
+        # Someone got to it first.
+        pass
+    except discord.Forbidden:
+        print("[arctober] not allowed to delete that message", flush=True)
+    except discord.HTTPException as e:
+        print(f"[arctober] delete failed: {e}", flush=True)
+    finally:
+        _arctober_tasks.pop(message.id, None)
+
+
+def _check_arctober(message: discord.Message) -> None:
+    """Schedule the deletion if this message is one to delete."""
+    if message.author.id != ARCTOBER_USER_ID:
+        return
+    if message.id in _arctober_tasks:
+        return
+    if not _mentions_arctober(message.content):
+        return
+    _arctober_tasks[message.id] = asyncio.create_task(_delete_arctober_later(message))
+    print(
+        f"[arctober] {message.id} matched, deleting in {ARCTOBER_DELETE_DELAY}s",
+        flush=True,
+    )
+
+
+@client.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    # Editing the word in afterwards is the obvious way around the filter.
+    if not switches["bot"]:
+        return
+    _check_arctober(after)
+
+
 @client.event
 async def on_ready():
     # Before syncing commands: a reconnect must not leave the bot answering
@@ -775,6 +854,8 @@ async def on_message(message):
     if not switches["bot"]:
         print("[on_message] ignoring: bot is off", flush=True)
         return
+
+    _check_arctober(message)
 
     # Store it now, not on a timer: this is the primary write path, and a
     # message that is not captured as it arrives is only recoverable by
