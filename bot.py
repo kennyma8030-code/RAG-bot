@@ -1,16 +1,15 @@
 import asyncio
 import logging
 import os
-import re
 import sys
 import time
-import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
+import arctober
 import db
 import loop
 import qa
@@ -83,8 +82,8 @@ NICK_LOCK_DELAY = 200
 # would otherwise stack up timers that all fire at once at the end.
 _nick_tasks: dict[int, asyncio.Task] = {}
 
-# Arc filter: this user's messages that say "arc-tober", or "arc" as a word, in
-# any disguise are deleted after the delay.
+# Arc filter: these users' messages that say arc-tober, October, or arc, in any
+# disguise, are deleted after the delay. What counts is decided in arctober.py.
 ARCTOBER_USER_ID = [850911464457240626, 1514032596365873245, 791960959513788426]
 ARCTOBER_DELETE_DELAY = 20
 
@@ -785,68 +784,6 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     )
 
 
-# Lookalikes that Unicode normalization leaves alone: leetspeak, Cyrillic and
-# Greek letters that render the same as Latin ones, small caps, and the
-# regional-indicator letters Discord shows as flag-style emoji.
-_LOOKALIKES = str.maketrans({
-    "4": "a", "@": "a", "а": "a", "α": "a", "ᴀ": "a",
-    "8": "b", "в": "b", "β": "b", "ʙ": "b",
-    "¢": "c", "©": "c", "с": "c", "ᴄ": "c",
-    "3": "e", "€": "e", "е": "e", "ε": "e", "ᴇ": "e",
-    "0": "o", "о": "o", "ο": "o", "ᴏ": "o",
-    "®": "r", "г": "r", "я": "r", "ʀ": "r",
-    "7": "t", "+": "t", "т": "t", "τ": "t", "ᴛ": "t",
-    **{chr(0x1F1E6 + i): chr(ord("a") + i) for i in range(26)},
-})
-
-
-def _fold(text: str) -> str:
-    """Lowercase plain letters, whatever alphabet or styling they arrived in.
-
-    NFKD folds fullwidth, bold, script, and circled letters to plain ones and
-    splits accents off; the table above covers what it misses. Accents and
-    invisible characters such as zero-width spaces are dropped outright rather
-    than becoming separators, so they cannot break a word in two.
-    """
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if unicodedata.category(c) not in ("Mn", "Cf"))
-    return text.casefold().translate(_LOOKALIKES)
-
-
-def _squash(letters: str) -> str:
-    """Collapse repeated letters: "aaarrrc" -> "arc"."""
-    return re.sub(r"(.)\1+", r"\1", letters)
-
-
-def _mentions_arc(text: str) -> bool:
-    """Whether text says arc-tober, or arc on its own, however disguised.
-
-    Arc-tober is looked for across everything but the letters, so separators,
-    spacing, and spoilers stop mattering, and with k standing in for c.
-
-    Arc only counts as a whole word: across everything, it would be found in
-    "search" and "march". Letters spelled out one at a time ("a r c", "a.r.c")
-    are joined back into a word first. No k for c here, since "ark" is a word
-    in its own right.
-    """
-    text = _fold(text)
-    if "arctober" in _squash(re.sub(r"[^a-z]", "", text).replace("k", "c")):
-        return True
-
-    words, spelled = [], ""
-    for word in re.findall(r"[a-z]+", text):
-        if len(word) == 1:
-            spelled += word
-            continue
-        if spelled:
-            words.append(spelled)
-            spelled = ""
-        words.append(word)
-    if spelled:
-        words.append(spelled)
-    return any(_squash(word) in ("arc", "arcs") for word in words)
-
-
 async def _delete_arctober_later(message: discord.Message) -> None:
     """Wait out the delay, then delete the message."""
     try:
@@ -870,7 +807,7 @@ def _check_arctober(message: discord.Message) -> None:
         return
     if message.id in _arctober_tasks:
         return
-    if not _mentions_arc(message.content):
+    if not arctober.mentions_arc(message.content):
         return
     _arctober_tasks[message.id] = asyncio.create_task(_delete_arctober_later(message))
     print(
