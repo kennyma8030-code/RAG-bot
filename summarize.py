@@ -499,11 +499,12 @@ async def embed_pending() -> int:
     return done
 
 
-async def run_once() -> int:
-    """Catch every known channel up, then embed whatever clusters are pending.
-    Safe to call repeatedly; this is what the daily timer and the startup run
-    both call."""
-    channel_ids = await db.known_channel_ids()
+async def run_once(channel_ids: list[int] | None = None) -> int:
+    """Catch the given channels up (every known one by default), then embed
+    whatever clusters are pending. Safe to call repeatedly; this is what the
+    daily timer and the startup run both call."""
+    if channel_ids is None:
+        channel_ids = await db.known_channel_ids()
     total = 0
     for channel_id in channel_ids:
         try:

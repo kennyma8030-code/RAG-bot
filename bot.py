@@ -63,6 +63,12 @@ ADMIN_USER_ID = int(os.environ["ADMIN_USER_ID"])
 # sync globally, which can take up to an hour to appear.
 GUILD_ID = int(os.environ["GUILD_ID"]) if os.environ.get("GUILD_ID") else None
 
+# The one server whose history RAG records and reads: recording, catch-up,
+# summaries, /backfill and /ask all do nothing anywhere else. Unset means
+# nowhere — a missing variable must not quietly open the store to every server
+# the bot is in.
+RAG_GUILD_ID = int(os.environ["RAG_GUILD_ID"]) if os.environ.get("RAG_GUILD_ID") else None
+
 # Nickname lock: this user's nickname gets put back to NICK_LOCK_NAME shortly
 # after they change it. Both must be set for the feature to do anything.
 NICK_LOCK_USER_ID = (
@@ -186,6 +192,16 @@ async def _powered_on(interaction: discord.Interaction) -> bool:
     if not switches["bot"]:
         await interaction.response.send_message(
             "The bot is off — run /power on:True first.", ephemeral=True
+        )
+        return False
+    return True
+
+
+async def _rag_server(interaction: discord.Interaction) -> bool:
+    """RAG's commands only work in RAG_GUILD_ID. Sends the refusal itself."""
+    if not _in_rag_guild(interaction.guild_id):
+        await interaction.response.send_message(
+            "RAG isn't enabled in this server.", ephemeral=True
         )
         return False
     return True
@@ -317,6 +333,8 @@ async def _scope_for(interaction: discord.Interaction) -> db.Scope:
 async def ask_command(interaction: discord.Interaction, ask: str):
     if not await _powered_on(interaction):
         return
+    if not await _rag_server(interaction):
+        return
 
     # The loop makes many model calls and searches; Discord drops any command
     # that has not replied within 3 seconds. defer() buys 15 minutes.
@@ -346,6 +364,30 @@ async def ask_command(interaction: discord.Interaction, ask: str):
     await interaction.followup.send(answer or "(the investigation produced no answer)")
 
 
+def _in_rag_guild(guild_id: int | None) -> bool:
+    return RAG_GUILD_ID is not None and guild_id == RAG_GUILD_ID
+
+
+def _guild_id_of(channel) -> int | None:
+    """The server a channel belongs to; None for DMs and unreachable channels."""
+    guild = getattr(channel, "guild", None)
+    return guild.id if guild else None
+
+
+async def _rag_channel_ids() -> list[int]:
+    """The stored channels catch-up and summaries may touch: RAG_GUILD_ID's.
+
+    Rows stored from other servers before RAG was fenced to one are left alone,
+    neither extended nor summarized. Resolved through Discord rather than the
+    stored guild_id, which is NULL on rows older than that column.
+    """
+    return [
+        channel_id
+        for channel_id in await db.known_channel_ids()
+        if _in_rag_guild(_guild_id_of(client.get_channel(channel_id)))
+    ]
+
+
 def _storable(message) -> bool:
     """Whether a message belongs in the store.
 
@@ -356,6 +398,8 @@ def _storable(message) -> bool:
     skips is the same hole with the sign flipped.
     """
     if message.author == client.user:
+        return False
+    if not _in_rag_guild(message.guild.id if message.guild else None):
         return False
     # An image-only post has content == "" and can never match a search.
     if not message.content:
@@ -455,9 +499,9 @@ async def _catch_up(*, since: datetime | None = None) -> None:
     The incremental walk stops at the first message it already has, so it skips
     such a hole every time it runs, forever.
 
-    Both are limited to channels the store already holds messages for: a channel
-    joins the corpus by being backfilled once, on purpose, and is kept current
-    from then on.
+    Both are limited to RAG_GUILD_ID's channels the store already holds
+    messages for: a channel joins the corpus by being backfilled once, on
+    purpose, and is kept current from then on.
     """
     tag = "repair" if since else "catch_up"
 
@@ -468,7 +512,7 @@ async def _catch_up(*, since: datetime | None = None) -> None:
     try:
         await db.open_pool()
         await db.init_db()
-        channel_ids = await db.known_channel_ids()
+        channel_ids = await _rag_channel_ids()
     except Exception as e:
         print(f"[{tag}] could not reach the db ({type(e).__name__}: {e})", flush=True)
         return
@@ -586,7 +630,7 @@ async def summarize_daily() -> None:
         async with _maintenance_lock:
             await db.open_pool()
             await db.init_db()
-            written = await summarize.run_once()
+            written = await summarize.run_once(await _rag_channel_ids())
     except Exception as e:
         # A failed run must not kill the timer; the next one retries the same
         # days, because a failed day is flagged and retried rather than skipped.
@@ -628,6 +672,8 @@ async def backfill(
         await interaction.response.send_message("NOT ALOUD!", ephemeral=True)
         return
     if not await _powered_on(interaction):
+        return
+    if not await _rag_server(interaction):
         return
 
     channel = channel or interaction.channel
@@ -865,6 +911,9 @@ async def on_ready():
             print(f"[sync] failed ({e.status}): {e}", flush=True)
 
     print(f"Logged in as {client.user}")
+    if RAG_GUILD_ID is None:
+        print("[rag] RAG_GUILD_ID is not set, so RAG records and answers nowhere",
+              flush=True)
 
     # Last, and in the background: catching up can take minutes on a long
     # outage, and on_ready must not block the gateway that whole time. Messages
