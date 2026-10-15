@@ -105,11 +105,12 @@ _synced = False
 # switches silently fall back to their defaults and the bot's real state is
 # whatever the last restart happened to leave.
 #
-# Both default to on. These are the values for a database that has never been
-# written to and for one that cannot be reached — and in both cases recording
-# is what we want, because a message not stored while the bot sat switched off
-# is gone for good. Anything stored that shouldn't have been can be deleted.
-switches = {"bot": True, "RAG": True}
+# These are the values for a database that has never been written to and for
+# one that cannot be reached; a stored value always wins over them. RAG
+# defaults to off: nothing is recorded, caught up, or summarized until /rag
+# turns it on, and messages sent while it is off are only recoverable by
+# /backfill.
+switches = {"bot": True, "RAG": False}
 
 # Ceiling on the write-through, leaving headroom inside Discord's 3s reply
 # deadline. See _save_switch.
@@ -865,8 +866,8 @@ async def on_message(message):
     # stored something that walk would skip, a failed write here could never
     # be repaired.
     if switches["RAG"] and _storable(message):
-        # RAG defaults to on, so this now runs on a deploy whose database is
-        # missing or asleep. Log and keep going: an unhandled exception here
+        # RAG can be on while the database is missing or asleep. Log and keep
+        # going: an unhandled exception here
         # fires on every single message and buries the real error. The write is
         # lost, which is what repair_daily exists to notice.
         try:
