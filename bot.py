@@ -79,7 +79,7 @@ _nick_tasks: dict[int, asyncio.Task] = {}
 
 # Arc-tober filter: this user's messages that spell "arc-tober" in any disguise
 # are deleted after the delay.
-ARCTOBER_USER_ID = [850911464457240626, 1514032596365873245]
+ARCTOBER_USER_ID = [850911464457240626, 1514032596365873245, 791960959513788426]
 ARCTOBER_DELETE_DELAY = 20
 
 # Pending deletions by message ID. An edit can match the same message again,
