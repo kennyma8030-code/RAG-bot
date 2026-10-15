@@ -79,7 +79,7 @@ _nick_tasks: dict[int, asyncio.Task] = {}
 
 # Arc-tober filter: this user's messages that spell "arc-tober" in any disguise
 # are deleted after the delay.
-ARCTOBER_USER_ID = 850911464457240626
+ARCTOBER_USER_ID = [850911464457240626, 1514032596365873245]
 ARCTOBER_DELETE_DELAY = 20
 
 # Pending deletions by message ID. An edit can match the same message again,
@@ -785,7 +785,7 @@ async def _delete_arctober_later(message: discord.Message) -> None:
 
 def _check_arctober(message: discord.Message) -> None:
     """Schedule the deletion if this message is one to delete."""
-    if message.author.id != ARCTOBER_USER_ID:
+    if message.author.id not in ARCTOBER_USER_ID:
         return
     if message.id in _arctober_tasks:
         return
